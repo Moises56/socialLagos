@@ -1,11 +1,19 @@
 import ffmpeg from "fluent-ffmpeg";
-import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { writeFile, readFile, unlink, mkdir } from "fs/promises";
+import { existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-// Set ffmpeg path from installer
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+// Set ffmpeg path: prefer @ffmpeg-installer package, fallback to system ffmpeg (Docker/Linux)
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const installer = require("@ffmpeg-installer/ffmpeg");
+  if (installer?.path && existsSync(installer.path)) {
+    ffmpeg.setFfmpegPath(installer.path);
+  }
+} catch {
+  // System ffmpeg from PATH will be used (installed via apt in Docker)
+}
 
 /**
  * Combine a static image with an audio file to create an MP4 video.
