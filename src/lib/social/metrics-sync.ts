@@ -2,7 +2,6 @@ import { connectDB } from "@/lib/db/mongoose";
 import SocialAccount from "@/lib/db/models/social-account.model";
 import Publication from "@/lib/db/models/publication.model";
 import MetricsSnapshot from "@/lib/db/models/metrics-snapshot.model";
-import GeneratedContent from "@/lib/db/models/generated-content.model";
 import { socialPublisher } from "./publisher";
 import { getDecryptedToken } from "./oauth-manager";
 
