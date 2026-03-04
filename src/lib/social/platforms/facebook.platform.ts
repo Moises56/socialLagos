@@ -50,6 +50,7 @@ export class FacebookPlatform implements ISocialPlatform {
   }
 
   async handleCallback(code: string, redirectUri: string): Promise<TokenPair> {
+    // Step 1: Exchange code for short-lived user token
     const url =
       `${META_API_BASE}/oauth/access_token?` +
       `client_id=${this.appId}` +
@@ -64,25 +65,80 @@ export class FacebookPlatform implements ISocialPlatform {
       throw new PlatformError("facebook", data.error.message, data.error);
     }
 
-    // Exchange for long-lived token
+    const shortLivedUserToken = data.access_token;
+
+    // Step 2: Try to get page access token with short-lived user token
+    // (more reliable than long-lived token for /me/accounts in some cases)
+    let pageAccessToken: string | null = null;
+    try {
+      const pagesRes = await fetch(
+        `${META_API_BASE}/me/accounts?fields=id,name,access_token&access_token=${shortLivedUserToken}`
+      );
+      const pagesData = await pagesRes.json();
+      pageAccessToken = pagesData.data?.[0]?.access_token ?? null;
+      console.log(
+        `[FB handleCallback] Short-lived token /me/accounts: pages=${pagesData.data?.length ?? 0}, hasPageToken=${!!pageAccessToken}`
+      );
+    } catch (err) {
+      console.log(
+        `[FB handleCallback] Failed to fetch pages with short-lived token:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+
+    // Step 3: Exchange for long-lived token
+    // If we got a page token, exchange THAT (produces a non-expiring page token)
+    // Otherwise exchange the user token
+    const tokenToExchange = pageAccessToken ?? shortLivedUserToken;
     const longLivedUrl =
       `${META_API_BASE}/oauth/access_token?` +
       `grant_type=fb_exchange_token` +
       `&client_id=${this.appId}` +
       `&client_secret=${this.appSecret}` +
-      `&fb_exchange_token=${data.access_token}`;
+      `&fb_exchange_token=${tokenToExchange}`;
 
     const longRes = await fetch(longLivedUrl);
     const longData = await longRes.json();
 
     if (longData.error) {
+      // If page token exchange fails, fall back to user token exchange
+      if (pageAccessToken) {
+        console.log(
+          `[FB handleCallback] Page token exchange failed, falling back to user token:`,
+          longData.error.message
+        );
+        const fallbackUrl =
+          `${META_API_BASE}/oauth/access_token?` +
+          `grant_type=fb_exchange_token` +
+          `&client_id=${this.appId}` +
+          `&client_secret=${this.appSecret}` +
+          `&fb_exchange_token=${shortLivedUserToken}`;
+        const fallbackRes = await fetch(fallbackUrl);
+        const fallbackData = await fallbackRes.json();
+
+        if (fallbackData.error) {
+          throw new PlatformError("facebook", fallbackData.error.message);
+        }
+
+        return {
+          accessToken: fallbackData.access_token,
+          expiresAt: new Date(
+            Date.now() + (fallbackData.expires_in ?? 5184000) * 1000
+          ),
+          scopes: ["pages_manage_posts", "pages_read_engagement"],
+        };
+      }
       throw new PlatformError("facebook", longData.error.message);
     }
+
+    console.log(
+      `[FB handleCallback] Token exchanged successfully, usedPageToken=${!!pageAccessToken}`
+    );
 
     return {
       accessToken: longData.access_token,
       expiresAt: new Date(Date.now() + (longData.expires_in ?? 5184000) * 1000),
-      scopes: ["pages_manage_posts", "pages_read_engagement", "read_insights"],
+      scopes: ["pages_manage_posts", "pages_read_engagement"],
     };
   }
 
@@ -147,8 +203,33 @@ export class FacebookPlatform implements ISocialPlatform {
       };
     }
 
-    // No pages found — require a Facebook Page for proper API functionality
-    console.log(`[FB getAccount] No pages found — cannot connect profile-only accounts`);
+    // /me/accounts returned empty — token might already be a page access token
+    // (happens when handleCallback exchanged a page token for long-lived)
+    console.log(`[FB getAccount] /me/accounts empty, trying /me as page token fallback`);
+    const meRes = await fetch(
+      `${META_API_BASE}/me?fields=id,name,category,picture.width(200)&access_token=${accessToken}`
+    );
+    const meData = await meRes.json();
+
+    if (meData.error) {
+      throw new PlatformError("facebook", meData.error.message);
+    }
+
+    // Pages have a 'category' field, personal profiles don't
+    if (meData.category) {
+      console.log(
+        `[FB getAccount] Token is a page token: id=${meData.id}, name=${meData.name}, category=${meData.category}`
+      );
+      return {
+        platformAccountId: meData.id,
+        accountName: meData.name,
+        accountType: "page",
+        avatarUrl: meData.picture?.data?.url,
+      };
+    }
+
+    // It's a personal profile — not supported for publishing
+    console.log(`[FB getAccount] No pages found and token is a profile token — cannot connect`);
     throw new PlatformError(
       "facebook",
       "No se encontraron Páginas de Facebook. SocialForge requiere una Página para publicar. Crea una en facebook.com/pages/create y vuelve a conectar."
